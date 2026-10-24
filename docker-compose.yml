@@ -1,0 +1,121 @@
+version: '3.8'
+
+services:
+  # 1. Frontend Web Client (React 18 + Vite)
+  web:
+    build:
+      context: .
+      dockerfile: infra/Dockerfile.web
+    ports:
+      - "5173:5173"
+    environment:
+      - VITE_API_BASE_URL=http://localhost:8000/api/v1
+    volumes:
+      - ./src:/app/src
+      - ./public:/app/public
+    depends_on:
+      - api
+
+  # 2. FastAPI Backend API
+  api:
+    build:
+      context: .
+      dockerfile: infra/Dockerfile.api
+    ports:
+      - "8000:8000"
+    environment:
+      - DATABASE_URL=postgresql://aicte_user:aicte_secure_pass@postgres:5432/aicte_db
+      - REDIS_URL=redis://redis:6379/0
+      - MINIO_ENDPOINT=minio:9000
+      - MINIO_ACCESS_KEY=aicte_minio_admin
+      - MINIO_SECRET_KEY=aicte_minio_secret_key_2026
+      - JWT_SECRET_KEY=aicte_jwt_production_master_secret_key_256bit
+      - LLM_PROVIDER=mock
+    depends_on:
+      postgres:
+        condition: service_healthy
+      redis:
+        condition: service_started
+      minio:
+        condition: service_started
+
+  # 3. Celery Background Worker (OCR, AI Agents & Rules Engine)
+  worker:
+    build:
+      context: .
+      dockerfile: infra/Dockerfile.api
+    command: celery -A worker.celery_app worker --loglevel=info -c 4
+    environment:
+      - DATABASE_URL=postgresql://aicte_user:aicte_secure_pass@postgres:5432/aicte_db
+      - REDIS_URL=redis://redis:6379/0
+      - MINIO_ENDPOINT=minio:9000
+      - MINIO_ACCESS_KEY=aicte_minio_admin
+      - MINIO_SECRET_KEY=aicte_minio_secret_key_2026
+    depends_on:
+      - api
+      - redis
+
+  # 4. Celery Beat Scheduler (Expiries, Undertakings & Escalations)
+  beat:
+    build:
+      context: .
+      dockerfile: infra/Dockerfile.api
+    command: celery -A worker.celery_app beat --loglevel=info
+    environment:
+      - DATABASE_URL=postgresql://aicte_user:aicte_secure_pass@postgres:5432/aicte_db
+      - REDIS_URL=redis://redis:6379/0
+    depends_on:
+      - worker
+      - redis
+
+  # 5. PostgreSQL 15 Relational Database
+  postgres:
+    image: postgres:15-alpine
+    restart: always
+    environment:
+      - POSTGRES_USER=aicte_user
+      - POSTGRES_PASSWORD=aicte_secure_pass
+      - POSTGRES_DB=aicte_db
+    ports:
+      - "5432:5432"
+    volumes:
+      - pgdata:/var/lib/postgresql/data
+      - ./infra/db/init_schema.sql:/docker-entrypoint-initdb.d/01_init.sql
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U aicte_user -d aicte_db"]
+      interval: 5s
+      timeout: 5s
+      retries: 5
+
+  # 6. Redis Message Broker & Cache
+  redis:
+    image: redis:7-alpine
+    ports:
+      - "6379:6379"
+    volumes:
+      - redisdata:/data
+
+  # 7. MinIO S3-Compatible Object Store
+  minio:
+    image: minio/minio:latest
+    command: server /data --console-address ":9001"
+    ports:
+      - "9000:9000"
+      - "9001:9001"
+    environment:
+      - MINIO_ROOT_USER=aicte_minio_admin
+      - MINIO_ROOT_PASSWORD=aicte_minio_secret_key_2026
+    volumes:
+      - miniodata:/data
+
+  # 8. MailHog SMTP Sandbox (Dev / Demo Email Testing)
+  mailhog:
+    image: mailhog/mailhog:latest
+    ports:
+      - "1025:1025" # SMTP
+      - "8025:8025" # Web UI
+
+volumes:
+  pgdata:
+  redisdata:
+  miniodata:
